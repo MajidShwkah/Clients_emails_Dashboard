@@ -8,10 +8,12 @@ export function Pagination({
   page,
   pageSize,
   total,
+  label = "items",
 }: {
   page: number;
   pageSize: number;
   total: number;
+  label?: string;
 }) {
   const router = useRouter();
   const params = useSearchParams();
@@ -29,7 +31,7 @@ export function Pagination({
   return (
     <div className="flex items-center justify-between text-sm text-muted-foreground">
       <span>
-        Page {page} of {totalPages} · {total} brands
+        Page {page} of {totalPages} · {total} {label}
       </span>
       <div className="flex gap-2">
         <Button

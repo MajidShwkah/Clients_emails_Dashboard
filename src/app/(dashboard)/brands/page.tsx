@@ -108,7 +108,6 @@ export default async function BrandsPage(props: {
                   <TableRow
                     key={b.id}
                     className="cursor-pointer hover:bg-muted/40"
-                    onClick={() => undefined}
                   >
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {b.id}
