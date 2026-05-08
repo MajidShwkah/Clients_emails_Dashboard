@@ -22,6 +22,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 
 export const metadata = { title: "Dashboard — RIME Email Routing" };
+export const revalidate = 30;
 
 export default async function DashboardHome(props: {
   searchParams: Promise<Record<string, string | undefined>>;
@@ -35,24 +36,16 @@ export default async function DashboardHome(props: {
   const fromTs = filters.from ? `${filters.from}T00:00:00.000Z` : undefined;
   const toTs   = filters.to   ? `${filters.to}T23:59:59.999Z`   : undefined;
 
-  // ── Filter bar data ───────────────────────────────────────────────────────
-  const [brandsListRes, branchesListRes] = await Promise.all([
-    supabase.from("brands").select("id, name").eq("is_archived", false).order("name"),
-    supabase.from("branches").select("id, name, brand").eq("is_archived", false).order("name"),
-  ]);
-  const brandsList   = brandsListRes.data   ?? [];
-  const branchesList = (branchesListRes.data ?? []) as { id: number; name: string | null; brand: number }[];
-
   // ── Helpers ───────────────────────────────────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function applyBaseFilters<T>(q: T): T {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let r = q as any;
-    if (fromTs)          r = r.gte("sent_at", fromTs);
-    if (toTs)            r = r.lte("sent_at", toTs);
-    if (filters.brandId)  r = r.eq("brand_id",  Number(filters.brandId));
-    if (filters.branchId) r = r.eq("branch_id", Number(filters.branchId));
-    if (filters.email)    r = r.ilike("recipient_email", `%${filters.email}%`);
+    if (fromTs)            r = r.gte("sent_at", fromTs);
+    if (toTs)              r = r.lte("sent_at", toTs);
+    if (filters.brandId)   r = r.eq("brand_id",  Number(filters.brandId));
+    if (filters.branchId)  r = r.eq("branch_id", Number(filters.branchId));
+    if (filters.email)     r = r.ilike("recipient_email", `%${filters.email}%`);
     return r;
   }
 
@@ -64,51 +57,68 @@ export default async function DashboardHome(props: {
     return r;
   }
 
-  // ── All queries in parallel ───────────────────────────────────────────────
+  // ── Round trip #1 — ALL queries in parallel ───────────────────────────────
   const [
-    brandWide,
-    branchSpecific,
-    globals,
-    brandsCount,
-    sendsFiltered,
-    deliveredFiltered,
-    bouncedFiltered,
-    failedFiltered,
-    volumeRaw,
-    statusRaw,
+    brandsListRes, branchesListRes,
+    brandWide, branchSpecific, globals, brandsCount,
+    sendsFiltered, deliveredFiltered, bouncedFiltered, failedFiltered,
+    volumeRes, statusRes,
     recentAudit,
+    sendsRes,
   ] = await Promise.all([
-    // Recipients — never filtered (structural metric)
+    // Filter bar data
+    supabase.from("brands").select("id, name").eq("is_archived", false).order("name"),
+    supabase.from("branches").select("id, name, brand").eq("is_archived", false).order("name"),
+
+    // Structural metrics — never filtered
     sync.from("email_recipients").select("*", { count: "exact", head: true }).eq("active", true).is("branch_id", null),
     sync.from("email_recipients").select("*", { count: "exact", head: true }).eq("active", true).not("branch_id", "is", null),
     sync.from("global_recipients").select("*", { count: "exact", head: true }).eq("active", true),
     supabase.from("brands").select("*", { count: "exact", head: true }).eq("is_archived", false),
 
-    // Metric counts — base filters only (status filter must not conflict with hardcoded .eq("status", ...))
+    // Metric counts — base filters only (no status conflict)
     applyBaseFilters(sync.from("email_sends").select("*", { count: "exact", head: true })),
     applyBaseFilters(sync.from("email_sends").select("*", { count: "exact", head: true }).eq("status", "delivered")),
     applyBaseFilters(sync.from("email_sends").select("*", { count: "exact", head: true }).eq("status", "bounced")),
     applyBaseFilters(sync.from("email_sends").select("*", { count: "exact", head: true }).eq("status", "failed")),
 
-    // Volume chart — base filters (count per day, status irrelevant)
-    applyBaseFilters(sync.from("email_sends").select("sent_at").limit(5000)),
+    // Charts — server-side aggregation via RPC (no 5000-row transfers)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (supabase.rpc as any)("get_send_volume_by_day", {
+      p_from_ts:   fromTs   ?? null,
+      p_to_ts:     toTs     ?? null,
+      p_brand_id:  filters.brandId  ? Number(filters.brandId)  : null,
+      p_branch_id: filters.branchId ? Number(filters.branchId) : null,
+      p_email:     filters.email    || null,
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (supabase.rpc as any)("get_status_counts", {
+      p_from_ts:   fromTs   ?? null,
+      p_to_ts:     toTs     ?? null,
+      p_brand_id:  filters.brandId  ? Number(filters.brandId)  : null,
+      p_branch_id: filters.branchId ? Number(filters.branchId) : null,
+      p_email:     filters.email    || null,
+      p_statuses:  filters.statuses.length ? filters.statuses : null,
+    }),
 
-    // Donut chart — full filters (status breakdown respects status filter)
-    applyFilters(sync.from("email_sends").select("status").limit(5000)),
-
-    // Audit log — structural, never filtered
+    // Audit log
     sync.from("email_audit_log")
       .select("id, table_name, record_id, action, changed_at")
       .order("changed_at", { ascending: false })
       .limit(15),
+
+    // Recent sends — included in the same round trip
+    applyFilters(
+      sync.from("email_sends").select(
+        "id, brand_id, branch_id, recipient_email, status, subject, sent_at, sg_message_id, failure_reason",
+      ),
+    ).order("sent_at", { ascending: false }).limit(20),
   ]);
 
-  // Server-side error logging
-  for (const [k, r] of Object.entries({ brandWide, branchSpecific, globals, brandsCount, sendsFiltered, deliveredFiltered, bouncedFiltered, failedFiltered })) {
-    if ("error" in r && r.error) console.error(`[dashboard] ${k}:`, r.error.message);
-  }
+  const brandsList   = (brandsListRes.data   ?? []) as { id: number; name: string }[];
+  const branchesList = (branchesListRes.data ?? []) as { id: number; name: string | null; brand: number }[];
 
-  // ── Section 1: Metrics ────────────────────────────────────────────────────
+  // ── Metrics ───────────────────────────────────────────────────────────────
   const bwCount  = brandWide.count   ?? 0;
   const bsCount  = branchSpecific.count ?? 0;
   const glCount  = globals.count     ?? 0;
@@ -122,64 +132,43 @@ export default async function DashboardHome(props: {
   const hasEmailData   = totalSends > 0;
 
   const deliveryRate = hasEmailData ? Math.round((totalDelivered / totalSends) * 100) : null;
-  const deliveryStatus =
-    deliveryRate === null ? "empty"
-    : deliveryRate >= 95  ? "good"
-    : deliveryRate >= 90  ? "warning"
-    : "critical";
 
-  // ── Section 2: Chart data ─────────────────────────────────────────────────
+  // ── Chart data — from RPC results ─────────────────────────────────────────
   const dayMap: Record<string, number> = {};
-  for (const row of volumeRaw.data ?? []) {
-    const day = (row.sent_at as string).substring(0, 10);
-    dayMap[day] = (dayMap[day] ?? 0) + 1;
+  for (const row of (volumeRes.data ?? []) as { day: string; cnt: number }[]) {
+    dayMap[row.day] = Number(row.cnt);
   }
 
-  // Build chart from the active date range (not always 30 days)
   const chartDays = buildDateRange(filters.from, filters.to);
   const volumeChartData: DayVolume[] = chartDays.map((key) => ({
-    date: key,
+    date:  key,
     count: dayMap[key] ?? 0,
   }));
 
-  const statusMap: Record<string, number> = {};
-  for (const row of statusRaw.data ?? []) {
-    const s = row.status as string;
-    statusMap[s] = (statusMap[s] ?? 0) + 1;
-  }
-  const statusChartData: StatusCount[] = Object.entries(statusMap)
-    .map(([status, count]) => ({ status, count }))
+  const statusChartData: StatusCount[] = ((statusRes.data ?? []) as { status: string; cnt: number }[])
+    .map(({ status, cnt }) => ({ status, count: Number(cnt) }))
     .sort((a, b) => b.count - a.count);
   const totalSends30d = statusChartData.reduce((s, r) => s + r.count, 0);
 
-  // ── Section 3: Recent sends ───────────────────────────────────────────────
-  let sendsData: SendRow[]                     = [];
-  let brandMap: Record<number, string>         = {};
-  let branchMap: Record<number, string>        = {};
-  let eventMap: Record<string, EventRow[]>     = {};
+  // ── Recent sends — reuse brandsList/branchesList, no extra query ──────────
+  const sendsData = (sendsRes.data ?? []) as SendRow[];
 
-  if (hasEmailData) {
-    const sendsQ = applyFilters(
-      sync.from("email_sends").select(
-        "id, brand_id, branch_id, recipient_email, status, subject, sent_at, sg_message_id, failure_reason",
-      ),
-    ).order("sent_at", { ascending: false }).limit(20);
+  // Build lookup maps from already-fetched data (zero extra queries)
+  const brandMap  = Object.fromEntries(brandsList.map((b) => [b.id, b.name]));
+  const branchMap = Object.fromEntries(
+    branchesList.map((b) => [b.id, b.name ?? `Branch ${b.id}`]),
+  );
 
-    const sendsRes = await sendsQ;
-    sendsData = (sendsRes.data ?? []) as SendRow[];
+  // ── Round trip #2 — events only (depends on send IDs) ────────────────────
+  const eventMap: Record<string, EventRow[]> = {};
+  if (sendsData.length > 0) {
+    const sIds   = sendsData.map((s) => s.id);
+    const evRes  = await sync
+      .from("email_events")
+      .select("id, send_id, event_type, event_at, reason")
+      .in("send_id", sIds)
+      .order("event_at", { ascending: true });
 
-    const bIds  = [...new Set(sendsData.map((s) => s.brand_id).filter((id): id is number => id !== null))];
-    const brIds = [...new Set(sendsData.map((s) => s.branch_id).filter((id): id is number => id !== null))];
-    const sIds  = sendsData.map((s) => s.id);
-
-    const [bRes, brRes, evRes] = await Promise.all([
-      bIds.length  > 0 ? supabase.from("brands").select("id, name").in("id", bIds)   : Promise.resolve({ data: [] as { id: number; name: string }[] }),
-      brIds.length > 0 ? supabase.from("branches").select("id, name").in("id", brIds) : Promise.resolve({ data: [] as { id: number; name: string | null }[] }),
-      sIds.length  > 0 ? sync.from("email_events").select("id, send_id, event_type, event_at, reason").in("send_id", sIds).order("event_at", { ascending: true }) : Promise.resolve({ data: [] as EventRow[] }),
-    ]);
-
-    brandMap  = Object.fromEntries((bRes.data  ?? []).map((b) => [b.id, b.name]));
-    branchMap = Object.fromEntries((brRes.data ?? []).map((b) => [b.id, b.name ?? `Branch ${b.id}`]));
     for (const e of (evRes.data ?? []) as EventRow[]) {
       if (e.send_id) {
         if (!eventMap[e.send_id]) eventMap[e.send_id] = [];
@@ -229,7 +218,7 @@ export default async function DashboardHome(props: {
         )}
       </div>
 
-      {/* Section 1: Metric Cards */}
+      {/* Metric Cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard
           title="Active Recipients"
@@ -254,7 +243,7 @@ export default async function DashboardHome(props: {
           }
           note={!hasEmailData ? "No sends yet" : undefined}
           icon={CheckCircle2}
-          status={deliveryStatus}
+          status={hasEmailData ? "good" : "empty"}
           iconStatus="good"
           animate={deliveryRate !== null}
         />
@@ -267,7 +256,7 @@ export default async function DashboardHome(props: {
             : "No issues detected"
           }
           icon={AlertTriangle}
-          status={totalIssues > 0 ? "critical" : hasEmailData ? "good" : "empty"}
+          status={totalIssues > 0 ? "critical" : hasEmailData ? "warning" : "empty"}
           iconStatus={totalIssues > 0 ? "critical" : "warning"}
         />
       </div>
@@ -275,16 +264,15 @@ export default async function DashboardHome(props: {
       {/* Filter bar */}
       <FilterBar brands={brandsList} branches={branchesList} defaultOpen={false} />
 
-      {/* Section 2: Charts */}
+      {/* Charts */}
       <div className="grid gap-4 xl:grid-cols-2">
         <SendVolumeChart data={volumeChartData} title={`Send Volume · ${chartRangeLabel}`} />
         <DeliveryDonut data={statusChartData} total={totalSends30d} title={`Delivery Breakdown · ${chartRangeLabel}`} />
       </div>
 
-      {/* Sections 3 + 4 */}
+      {/* Recent sends + alerts */}
       <div className="grid gap-4 items-start 2xl:grid-cols-[1fr_300px]">
 
-        {/* Section 3: Sends / audit log */}
         {hasEmailData ? (
           <Card>
             <CardHeader className="pb-3">
@@ -349,7 +337,6 @@ export default async function DashboardHome(props: {
           </Card>
         )}
 
-        {/* Section 4: Alerts */}
         <AlertsPanel
           hasEmailData={hasEmailData}
           bouncedCount={bouncedCount}
@@ -363,7 +350,6 @@ export default async function DashboardHome(props: {
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 
-/** Build an array of YYYY-MM-DD strings covering the active date range (max 90 days). */
 function buildDateRange(from: string, to: string): string[] {
   if (!from || !to) return [];
   const start = new Date(from);

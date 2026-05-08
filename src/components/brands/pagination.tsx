@@ -23,7 +23,7 @@ export function Pagination({
     const sp = new URLSearchParams(params.toString());
     if (next === 1) sp.delete("page");
     else sp.set("page", String(next));
-    router.replace(`?${sp.toString()}`);
+    router.push(`?${sp.toString()}`);
   }
 
   if (total <= pageSize) return null;

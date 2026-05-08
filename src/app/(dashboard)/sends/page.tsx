@@ -10,6 +10,7 @@ import { Pagination } from "@/components/brands/pagination";
 import { Card, CardContent } from "@/components/ui/card";
 
 export const metadata = { title: "Sends — RIME Email Routing" };
+export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 25;
 
@@ -23,70 +24,63 @@ export default async function SendsPage(props: {
   const supabase = await createClient();
   const sync     = supabase.schema("sync");
 
-  // from/to as UTC boundary timestamps
   const fromTs = filters.from ? `${filters.from}T00:00:00.000Z` : undefined;
   const toTs   = filters.to   ? `${filters.to}T23:59:59.999Z`   : undefined;
 
-  // ── Filter bar data (brands + branches) ─────────────────────────────────
-  const [brandsRes, branchesRes] = await Promise.all([
-    supabase.from("brands").select("id, name").eq("is_archived", false).order("name"),
-    supabase.from("branches").select("id, name, brand").eq("is_archived", false).order("name"),
-  ]);
-
-  const brands   = brandsRes.data   ?? [];
-  const branches = (branchesRes.data ?? []) as { id: number; name: string | null; brand: number }[];
-
-  // ── Sends query ──────────────────────────────────────────────────────────
+  // Build filter-applied query builders
   let countQ = sync.from("email_sends").select("*", { count: "exact", head: true });
   let rowQ   = sync
     .from("email_sends")
     .select("id, brand_id, branch_id, recipient_email, status, subject, sent_at, sg_message_id, failure_reason")
     .order("sent_at", { ascending: false });
 
-  if (fromTs)                   { countQ = countQ.gte("sent_at", fromTs);  rowQ = rowQ.gte("sent_at", fromTs); }
-  if (toTs)                     { countQ = countQ.lte("sent_at", toTs);    rowQ = rowQ.lte("sent_at", toTs); }
-  if (filters.brandId)          { countQ = countQ.eq("brand_id", Number(filters.brandId));   rowQ = rowQ.eq("brand_id", Number(filters.brandId)); }
-  if (filters.branchId)         { countQ = countQ.eq("branch_id", Number(filters.branchId)); rowQ = rowQ.eq("branch_id", Number(filters.branchId)); }
-  if (filters.email)            { countQ = countQ.ilike("recipient_email", `%${filters.email}%`); rowQ = rowQ.ilike("recipient_email", `%${filters.email}%`); }
-  if (filters.statuses.length)  { countQ = countQ.in("status", filters.statuses);  rowQ = rowQ.in("status", filters.statuses); }
+  if (fromTs)                  { countQ = countQ.gte("sent_at", fromTs);  rowQ = rowQ.gte("sent_at", fromTs); }
+  if (toTs)                    { countQ = countQ.lte("sent_at", toTs);    rowQ = rowQ.lte("sent_at", toTs); }
+  if (filters.brandId)         { countQ = countQ.eq("brand_id",  Number(filters.brandId));  rowQ = rowQ.eq("brand_id",  Number(filters.brandId)); }
+  if (filters.branchId)        { countQ = countQ.eq("branch_id", Number(filters.branchId)); rowQ = rowQ.eq("branch_id", Number(filters.branchId)); }
+  if (filters.email)           { countQ = countQ.ilike("recipient_email", `%${filters.email}%`); rowQ = rowQ.ilike("recipient_email", `%${filters.email}%`); }
+  if (filters.statuses.length) { countQ = countQ.in("status", filters.statuses); rowQ = rowQ.in("status", filters.statuses); }
 
-  const from = (page - 1) * PAGE_SIZE;
-  const [countRes, rowRes] = await Promise.all([
+  const offset = (page - 1) * PAGE_SIZE;
+
+  // ── Round trip #1 — all four queries in parallel ──────────────────────────
+  const [brandsRes, branchesRes, countRes, rowRes] = await Promise.all([
+    supabase.from("brands").select("id, name").eq("is_archived", false).order("name"),
+    supabase.from("branches").select("id, name, brand").eq("is_archived", false).order("name"),
     countQ,
-    rowQ.range(from, from + PAGE_SIZE - 1),
+    rowQ.range(offset, offset + PAGE_SIZE - 1),
   ]);
 
   if (countRes.error) console.error("[sends] count:", countRes.error.message);
-  if (rowRes.error)   console.error("[sends] rows:", rowRes.error.message);
+  if (rowRes.error)   console.error("[sends] rows:",  rowRes.error.message);
 
-  const sends = (rowRes.data ?? []) as SendRow[];
-  const total = countRes.count ?? 0;
+  const brands   = (brandsRes.data   ?? []) as { id: number; name: string }[];
+  const branches = (branchesRes.data ?? []) as { id: number; name: string | null; brand: number }[];
+  const sends    = (rowRes.data     ?? []) as SendRow[];
+  const total    = countRes.count   ?? 0;
 
-  // ── Brand / branch / event lookups for table ─────────────────────────────
-  const brandIds  = [...new Set(sends.map((s) => s.brand_id).filter((id): id is number => id !== null))];
-  const branchIds = [...new Set(sends.map((s) => s.branch_id).filter((id): id is number => id !== null))];
-  const sendIds   = sends.map((s) => s.id);
+  // Build maps from already-fetched data — no extra queries
+  const brandMap  = Object.fromEntries(brands.map((b) => [b.id, b.name]));
+  const branchMap = Object.fromEntries(branches.map((b) => [b.id, b.name ?? `Branch ${b.id}`]));
 
-  const [bNamesRes, brNamesRes, eventsRes] = await Promise.all([
-    brandIds.length  > 0 ? supabase.from("brands").select("id, name").in("id", brandIds)   : Promise.resolve({ data: [] as { id: number; name: string }[] }),
-    branchIds.length > 0 ? supabase.from("branches").select("id, name").in("id", branchIds) : Promise.resolve({ data: [] as { id: number; name: string | null }[] }),
-    sendIds.length   > 0
-      ? sync.from("email_events").select("id, send_id, event_type, event_at, reason").in("send_id", sendIds).order("event_at", { ascending: true })
-      : Promise.resolve({ data: [] as EventRow[] }),
-  ]);
-
-  const brandMap  = Object.fromEntries((bNamesRes.data  ?? []).map((b) => [b.id, b.name]));
-  const branchMap = Object.fromEntries((brNamesRes.data ?? []).map((b) => [b.id, b.name ?? `Branch ${b.id}`]));
-
+  // ── Round trip #2 — events only (depends on send IDs) ────────────────────
   const eventMap: Record<string, EventRow[]> = {};
-  for (const e of (eventsRes.data ?? []) as EventRow[]) {
-    if (e.send_id) {
-      if (!eventMap[e.send_id]) eventMap[e.send_id] = [];
-      eventMap[e.send_id].push(e);
+  if (sends.length > 0) {
+    const sendIds = sends.map((s) => s.id);
+    const evRes   = await sync
+      .from("email_events")
+      .select("id, send_id, event_type, event_at, reason")
+      .in("send_id", sendIds)
+      .order("event_at", { ascending: true });
+
+    for (const e of (evRes.data ?? []) as EventRow[]) {
+      if (e.send_id) {
+        if (!eventMap[e.send_id]) eventMap[e.send_id] = [];
+        eventMap[e.send_id].push(e);
+      }
     }
   }
 
-  // ── Active filter summary ─────────────────────────────────────────────────
   const filterSummary = buildSummary(filters, brands);
 
   return (
@@ -98,10 +92,8 @@ export default async function SendsPage(props: {
         </p>
       </div>
 
-      {/* Filter bar */}
       <FilterBar brands={brands} branches={branches} />
 
-      {/* Result summary */}
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
           {filterSummary && (
@@ -111,7 +103,6 @@ export default async function SendsPage(props: {
         </p>
       </div>
 
-      {/* Table */}
       <Card>
         <CardContent className="p-4">
           {rowRes.error ? (

@@ -9,7 +9,6 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from "@/components/ui/select";
 import {
   DropdownMenu,
@@ -17,6 +16,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { cn } from "@/lib/utils";
 import {
   type DatePreset,
@@ -83,11 +83,11 @@ export function FilterBar({
   }
 
   function setBrand(id: string | null) {
-    setLocal((p) => ({ ...p, brandId: !id || id === "__all" ? "" : id, branchId: "" }));
+    setLocal((p) => ({ ...p, brandId: id ?? "", branchId: "" }));
   }
 
   function setBranch(id: string | null) {
-    setLocal((p) => ({ ...p, branchId: !id || id === "__all" ? "" : id }));
+    setLocal((p) => ({ ...p, branchId: id ?? "" }));
   }
 
   function toggleStatus(value: string) {
@@ -159,7 +159,9 @@ export function FilterBar({
             <Field label="Date range">
               <Select value={local.preset} onValueChange={(v) => setPreset(v as DatePreset)}>
                 <SelectTrigger className="h-8 w-[140px]">
-                  <SelectValue />
+                  <span className="flex-1 truncate text-left text-sm">
+                    {DATE_PRESETS.find((p) => p.value === local.preset)?.label ?? local.preset}
+                  </span>
                 </SelectTrigger>
                 <SelectContent>
                   {DATE_PRESETS.map((p) => (
@@ -189,44 +191,24 @@ export function FilterBar({
 
             {/* Brand */}
             <Field label="Brand">
-              <Select value={local.brandId || "__all"} onValueChange={setBrand}>
-                <SelectTrigger className="h-8 w-[160px]">
-                  <span className="flex-1 truncate text-left text-sm">
-                    {local.brandId
-                      ? (brands.find((b) => String(b.id) === local.brandId)?.name ?? local.brandId)
-                      : "All brands"}
-                  </span>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__all">All brands</SelectItem>
-                  {brands.map((b) => (
-                    <SelectItem key={b.id} value={String(b.id)}>
-                      {b.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <SearchableSelect
+                value={local.brandId}
+                onChange={(v) => setBrand(v || null)}
+                options={brands.map((b) => ({ value: String(b.id), label: b.name }))}
+                allLabel="All brands"
+                width="w-[180px]"
+              />
             </Field>
 
-            {/* Branch — always show, but scope to brand if one is selected */}
+            {/* Branch */}
             <Field label="Branch">
-              <Select value={local.branchId || "__all"} onValueChange={setBranch}>
-                <SelectTrigger className="h-8 w-[160px]">
-                  <span className="flex-1 truncate text-left text-sm">
-                    {local.branchId
-                      ? (visibleBranches.find((b) => String(b.id) === local.branchId)?.name ?? `Branch ${local.branchId}`)
-                      : "All branches"}
-                  </span>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__all">All branches</SelectItem>
-                  {visibleBranches.map((b) => (
-                    <SelectItem key={b.id} value={String(b.id)}>
-                      {b.name ?? `Branch ${b.id}`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <SearchableSelect
+                value={local.branchId}
+                onChange={(v) => setBranch(v || null)}
+                options={visibleBranches.map((b) => ({ value: String(b.id), label: b.name ?? `Branch ${b.id}` }))}
+                allLabel="All branches"
+                width="w-[180px]"
+              />
             </Field>
 
             {/* Email */}
