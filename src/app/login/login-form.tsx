@@ -23,7 +23,8 @@ import {
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const next = searchParams.get("next") || "/dashboard";
+  const next   = searchParams.get("next")   || "/dashboard";
+  const reason = searchParams.get("reason") || "";
 
   const [submitting, setSubmitting] = useState(false);
   const {
@@ -59,6 +60,11 @@ export function LoginForm() {
         <CardDescription>Sign in to manage recipients.</CardDescription>
       </CardHeader>
       <CardContent>
+        {reason === "idle" && (
+          <div className="mb-4 rounded-md bg-amber-50 px-3 py-2.5 text-center text-sm text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+            Session expired due to inactivity.
+          </div>
+        )}
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="email">Email</Label>

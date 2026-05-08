@@ -25,16 +25,18 @@ const STATUS_CONFIG: Record<string, { color: string; label: string }> = {
 export function DeliveryDonut({
   data,
   total,
+  title,
 }: {
   data: StatusCount[];
   total: number;
+  title: string;
 }) {
   const isEmpty = total === 0;
 
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium">Delivery Breakdown (30d)</CardTitle>
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="relative h-[300px]">
@@ -58,7 +60,7 @@ export function DeliveryDonut({
               </ResponsiveContainer>
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                 <p className="max-w-[130px] text-center text-xs text-muted-foreground">
-                  Delivery tracking starts post-deployment
+                  No sends in this period
                 </p>
               </div>
             </>
@@ -113,10 +115,8 @@ export function DeliveryDonut({
                 </div>
               </div>
 
-              {/* Manual legend */}
-              <div
-                className="absolute top-1/2 right-4 -translate-y-1/2 flex flex-col gap-1.5"
-              >
+              {/* Legend */}
+              <div className="absolute top-1/2 right-4 -translate-y-1/2 flex flex-col gap-1.5">
                 {data.map((entry) => {
                   const cfg = STATUS_CONFIG[entry.status];
                   const pct = Math.round((entry.count / total) * 100);

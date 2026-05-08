@@ -43,16 +43,23 @@ export default async function DashboardHome(props: {
   const brandsList   = brandsListRes.data   ?? [];
   const branchesList = (branchesListRes.data ?? []) as { id: number; name: string | null; brand: number }[];
 
-  // ── Helper: apply date + brand + branch + email + status to any query ─────
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function applyBaseFilters<T>(q: T): T {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let r = q as any;
+    if (fromTs)          r = r.gte("sent_at", fromTs);
+    if (toTs)            r = r.lte("sent_at", toTs);
+    if (filters.brandId)  r = r.eq("brand_id",  Number(filters.brandId));
+    if (filters.branchId) r = r.eq("branch_id", Number(filters.branchId));
+    if (filters.email)    r = r.ilike("recipient_email", `%${filters.email}%`);
+    return r;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function applyFilters<T>(q: T): T {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let r = q as any;
-    if (fromTs)                  r = r.gte("sent_at", fromTs);
-    if (toTs)                    r = r.lte("sent_at", toTs);
-    if (filters.brandId)         r = r.eq("brand_id", Number(filters.brandId));
-    if (filters.branchId)        r = r.eq("branch_id", Number(filters.branchId));
-    if (filters.email)           r = r.ilike("recipient_email", `%${filters.email}%`);
+    let r = applyBaseFilters(q) as any;
     if (filters.statuses.length) r = r.in("status", filters.statuses);
     return r;
   }
@@ -77,14 +84,16 @@ export default async function DashboardHome(props: {
     sync.from("global_recipients").select("*", { count: "exact", head: true }).eq("active", true),
     supabase.from("brands").select("*", { count: "exact", head: true }).eq("is_archived", false),
 
-    // Metric counts — respect all filters
-    applyFilters(sync.from("email_sends").select("*", { count: "exact", head: true })),
-    applyFilters(sync.from("email_sends").select("*", { count: "exact", head: true }).eq("status", "delivered")),
-    applyFilters(sync.from("email_sends").select("*", { count: "exact", head: true }).eq("status", "bounced")),
-    applyFilters(sync.from("email_sends").select("*", { count: "exact", head: true }).eq("status", "failed")),
+    // Metric counts — base filters only (status filter must not conflict with hardcoded .eq("status", ...))
+    applyBaseFilters(sync.from("email_sends").select("*", { count: "exact", head: true })),
+    applyBaseFilters(sync.from("email_sends").select("*", { count: "exact", head: true }).eq("status", "delivered")),
+    applyBaseFilters(sync.from("email_sends").select("*", { count: "exact", head: true }).eq("status", "bounced")),
+    applyBaseFilters(sync.from("email_sends").select("*", { count: "exact", head: true }).eq("status", "failed")),
 
-    // Chart data — respect filters
-    applyFilters(sync.from("email_sends").select("sent_at").limit(5000)),
+    // Volume chart — base filters (count per day, status irrelevant)
+    applyBaseFilters(sync.from("email_sends").select("sent_at").limit(5000)),
+
+    // Donut chart — full filters (status breakdown respects status filter)
     applyFilters(sync.from("email_sends").select("status").limit(5000)),
 
     // Audit log — structural, never filtered
@@ -179,14 +188,28 @@ export default async function DashboardHome(props: {
     }
   }
 
-  // ── Filter active label ───────────────────────────────────────────────────
+  // ── Labels ────────────────────────────────────────────────────────────────
   const isFiltered =
     filters.brandId || filters.branchId || filters.email ||
     filters.statuses.length || filters.preset !== "7d";
 
+  const PRESET_LABELS: Record<string, string> = {
+    today: "today", yesterday: "yesterday",
+    "7d": "last 7 days", "30d": "last 30 days", "90d": "last 90 days",
+  };
+  const CHART_LABELS: Record<string, string> = {
+    today: "Today", yesterday: "Yesterday",
+    "7d": "Last 7d", "30d": "Last 30d", "90d": "Last 90d",
+  };
+
   const dateRangeLabel =
     filters.preset !== "custom"
-      ? { today: "today", yesterday: "yesterday", "7d": "last 7 days", "30d": "last 30 days", "90d": "last 90 days" }[filters.preset]
+      ? PRESET_LABELS[filters.preset] ?? filters.preset
+      : `${filters.from} → ${filters.to}`;
+
+  const chartRangeLabel =
+    filters.preset !== "custom"
+      ? CHART_LABELS[filters.preset] ?? filters.preset
       : `${filters.from} → ${filters.to}`;
 
   return (
@@ -232,6 +255,8 @@ export default async function DashboardHome(props: {
           note={!hasEmailData ? "No sends yet" : undefined}
           icon={CheckCircle2}
           status={deliveryStatus}
+          iconStatus="good"
+          animate={deliveryRate !== null}
         />
         <MetricCard
           title="Active Issues"
@@ -243,6 +268,7 @@ export default async function DashboardHome(props: {
           }
           icon={AlertTriangle}
           status={totalIssues > 0 ? "critical" : hasEmailData ? "good" : "empty"}
+          iconStatus={totalIssues > 0 ? "critical" : "warning"}
         />
       </div>
 
@@ -251,8 +277,8 @@ export default async function DashboardHome(props: {
 
       {/* Section 2: Charts */}
       <div className="grid gap-4 xl:grid-cols-2">
-        <SendVolumeChart data={volumeChartData} />
-        <DeliveryDonut data={statusChartData} total={totalSends30d} />
+        <SendVolumeChart data={volumeChartData} title={`Send Volume · ${chartRangeLabel}`} />
+        <DeliveryDonut data={statusChartData} total={totalSends30d} title={`Delivery Breakdown · ${chartRangeLabel}`} />
       </div>
 
       {/* Sections 3 + 4 */}
@@ -328,6 +354,7 @@ export default async function DashboardHome(props: {
           hasEmailData={hasEmailData}
           bouncedCount={bouncedCount}
           failedCount={failedCount}
+          dateRangeLabel={dateRangeLabel}
         />
       </div>
     </div>

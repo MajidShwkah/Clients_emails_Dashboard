@@ -191,7 +191,11 @@ export function FilterBar({
             <Field label="Brand">
               <Select value={local.brandId || "__all"} onValueChange={setBrand}>
                 <SelectTrigger className="h-8 w-[160px]">
-                  <SelectValue placeholder="All brands" />
+                  <span className="flex-1 truncate text-left text-sm">
+                    {local.brandId
+                      ? (brands.find((b) => String(b.id) === local.brandId)?.name ?? local.brandId)
+                      : "All brands"}
+                  </span>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__all">All brands</SelectItem>
@@ -206,12 +210,13 @@ export function FilterBar({
 
             {/* Branch — always show, but scope to brand if one is selected */}
             <Field label="Branch">
-              <Select
-                value={local.branchId || "__all"}
-                onValueChange={setBranch}
-              >
+              <Select value={local.branchId || "__all"} onValueChange={setBranch}>
                 <SelectTrigger className="h-8 w-[160px]">
-                  <SelectValue placeholder="All branches" />
+                  <span className="flex-1 truncate text-left text-sm">
+                    {local.branchId
+                      ? (visibleBranches.find((b) => String(b.id) === local.branchId)?.name ?? `Branch ${local.branchId}`)
+                      : "All branches"}
+                  </span>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__all">All branches</SelectItem>
