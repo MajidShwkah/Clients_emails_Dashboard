@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Search, X, ChevronDown } from "lucide-react";
+import { Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -11,7 +11,15 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { cn } from "@/lib/utils";
+import { presetDates, type DatePreset } from "@/lib/filter-utils";
+
+const DATE_PRESETS: { value: DatePreset; label: string }[] = [
+  { value: "today",     label: "Today" },
+  { value: "yesterday", label: "Yesterday" },
+  { value: "7d",        label: "Last 7 days" },
+  { value: "30d",       label: "Last 30 days" },
+  { value: "90d",       label: "Last 90 days" },
+];
 
 const STATUS_OPTIONS = [
   { value: "",             label: "All statuses" },
@@ -29,12 +37,17 @@ export function MissingFilters({
   const sp     = useSearchParams();
   const [pending, startTransition] = useTransition();
 
-  const [email,    setEmail]    = useState(sp.get("email")  ?? "");
-  const [brandId,  setBrandId]  = useState(sp.get("brand")  ?? "");
-  const [status,   setStatus]   = useState(sp.get("status") ?? "");
+  const [preset,  setPreset]  = useState<DatePreset>((sp.get("preset") as DatePreset) ?? "30d");
+  const [email,   setEmail]   = useState(sp.get("email")  ?? "");
+  const [brandId, setBrandId] = useState(sp.get("brand")  ?? "");
+  const [status,  setStatus]  = useState(sp.get("status") ?? "");
 
   function apply() {
     const p = new URLSearchParams();
+    const dates = presetDates(preset as Exclude<DatePreset, "custom">);
+    p.set("preset", preset);
+    p.set("from",   dates.from);
+    p.set("to",     dates.to);
     if (email)   p.set("email",  email);
     if (brandId) p.set("brand",  brandId);
     if (status)  p.set("status", status);
@@ -42,16 +55,37 @@ export function MissingFilters({
   }
 
   function reset() {
-    setEmail(""); setBrandId(""); setStatus("");
-    startTransition(() => router.push("?"));
+    const dates = presetDates("30d" as Exclude<DatePreset, "custom">);
+    setPreset("30d"); setEmail(""); setBrandId(""); setStatus("");
+    const p = new URLSearchParams();
+    p.set("preset", "30d");
+    p.set("from", dates.from);
+    p.set("to",   dates.to);
+    startTransition(() => router.push(`?${p.toString()}`));
   }
 
-  const hasActive = email || brandId || status;
-
+  const hasActive = email || brandId || status || preset !== "30d";
   const statusLabel = STATUS_OPTIONS.find((s) => s.value === status)?.label ?? "All statuses";
 
   return (
     <div className="flex flex-wrap items-end gap-3">
+
+      {/* Date range */}
+      <div className="flex flex-col gap-1">
+        <span className="text-xs font-medium text-muted-foreground">Date range</span>
+        <Select value={preset} onValueChange={(v) => setPreset(v as DatePreset)}>
+          <SelectTrigger className="h-8 w-[140px]">
+            <span className="flex-1 truncate text-left text-sm">
+              {DATE_PRESETS.find((p) => p.value === preset)?.label ?? preset}
+            </span>
+          </SelectTrigger>
+          <SelectContent>
+            {DATE_PRESETS.map((p) => (
+              <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
 
       {/* Email search */}
       <div className="flex flex-col gap-1">

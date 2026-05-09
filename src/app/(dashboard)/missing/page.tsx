@@ -2,12 +2,14 @@ import { createClient } from "@/lib/supabase/server";
 import { Pagination } from "@/components/brands/pagination";
 import { Card, CardContent } from "@/components/ui/card";
 import { MissingFilters } from "@/components/missing/missing-filters";
+import { RecipientHistoryDrawer } from "@/components/missing/recipient-history-drawer";
+import { InfoTooltip } from "@/components/ui/info-tooltip";
 import { cn } from "@/lib/utils";
-import type { MissingDelivery } from "@/lib/types/db";
+import { presetDates, type DatePreset } from "@/lib/filter-utils";
 import { MailX, MailWarning, MailCheck, ArrowUpDown } from "lucide-react";
 
 export const metadata = { title: "Missing Deliveries — RIME Email Routing" };
-export const revalidate = 60; // cache for 60 s, revalidate in background
+export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 50;
 
@@ -20,13 +22,18 @@ const SOURCE_LABEL: Record<string, string> = {
 
 type SortKey = "priority" | "email" | "brand" | "last";
 
-function StatusBadge({
-  attempts,
-  delivered,
-}: {
-  attempts: number;
-  delivered: number;
-}) {
+type MissingRow = {
+  brand_id:       number | null;
+  branch_id:      number | null;
+  email:          string | null;
+  source:         string | null;
+  total_attempts: number;
+  delivered:      number;
+  failed:         number;
+  last_attempt:   string | null;
+};
+
+function StatusBadge({ attempts, delivered }: { attempts: number; delivered: number }) {
   if (attempts === 0) return (
     <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium bg-muted text-muted-foreground">
       <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50" />
@@ -47,13 +54,7 @@ function StatusBadge({
   );
 }
 
-function DeliveryFraction({
-  delivered,
-  attempts,
-}: {
-  delivered: number;
-  attempts: number;
-}) {
+function DeliveryFraction({ delivered, attempts }: { delivered: number; attempts: number }) {
   if (attempts === 0) return <span className="text-xs text-muted-foreground">—</span>;
   const missing = attempts - delivered;
   const pct = Math.round((delivered / attempts) * 100);
@@ -62,16 +63,11 @@ function DeliveryFraction({
       <div className="flex items-baseline gap-1 text-xs tabular-nums">
         <span className="font-medium text-foreground">{delivered}</span>
         <span className="text-muted-foreground">/ {attempts}</span>
-        {missing > 0 && (
-          <span className="ml-1 text-red-500 dark:text-red-400">−{missing}</span>
-        )}
+        {missing > 0 && <span className="ml-1 text-red-500 dark:text-red-400">−{missing}</span>}
       </div>
       <div className="h-1 w-full rounded-full bg-muted overflow-hidden">
         <div
-          className={cn(
-            "h-full rounded-full transition-all",
-            pct === 100 ? "bg-emerald-500" : pct >= 50 ? "bg-amber-400" : "bg-red-400",
-          )}
+          className={cn("h-full rounded-full", pct === 100 ? "bg-emerald-500" : pct >= 50 ? "bg-amber-400" : "bg-red-400")}
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -90,82 +86,70 @@ export default async function MissingDeliveriesPage(props: {
   const statusQ = sp.status ?? "";
   const sort    = (sp.sort  ?? "priority") as SortKey;
 
+  // Date range — default to last 30 days
+  const preset   = (sp.preset as DatePreset) ?? "30d";
+  const safePreset = (preset === "custom" ? "30d" : preset) as Exclude<DatePreset, "custom">;
+  const defaults = presetDates(safePreset);
+  const fromDate = sp.from ?? defaults.from;
+  const toDate   = sp.to   ?? defaults.to;
+  const fromTs   = `${fromDate}T00:00:00.000Z`;
+  const toTs     = `${toDate}T23:59:59.999Z`;
+
   const supabase = await createClient();
-  const sync     = supabase.schema("sync");
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function applyBase<T>(q: T): T {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let r = q as any;
-    if (emailQ) r = r.ilike("email",    `%${emailQ}%`);
-    if (brandQ) r = r.eq("brand_id",    Number(brandQ));
-    return r;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function applyStatus<T>(q: T, s: string): T {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let r = q as any;
-    if (s === "never")       r = r.eq("total_attempts", 0);
-    if (s === "undelivered") r = r.gt("total_attempts", 0).eq("delivered", 0);
-    if (s === "partial")     r = r.gt("delivered", 0);
-    return r;
-  }
 
   // ── All queries in parallel ───────────────────────────────────────────────
-  const [
-    brandsRes,
-    summaryRes,
-    countRes,
-    rowRes,
-  ] = await Promise.all([
-    // Brands — reused for filter dropdown and name lookup
+  const [brandsRes, summaryRes, rowsRes] = await Promise.all([
     supabase.from("brands").select("id, name").eq("is_archived", false).order("name"),
 
-    // Summary chips — single RPC replaces 3 separate count queries
+    // Summary chips — all 3 counts in one query
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (supabase.rpc as any)("get_missing_delivery_summary", {
+      p_from_ts:  fromTs,
+      p_to_ts:    toTs,
       p_brand_id: brandQ ? Number(brandQ) : null,
       p_email:    emailQ || null,
     }),
 
-    // Paginated count
-    applyStatus(applyBase(
-      sync.from("v_missing_deliveries").select("*", { count: "exact", head: true }),
-    ), statusQ),
-
-    // Rows
-    (() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let q: any = applyStatus(
-        applyBase(sync.from("v_missing_deliveries")
-          .select("brand_id, branch_id, email, source, total_attempts, delivered, failed, last_attempt")),
-        statusQ,
-      );
-      if (sort === "email")      q = q.order("email",           { ascending: true });
-      else if (sort === "brand") q = q.order("brand_id",        { ascending: true });
-      else if (sort === "last")  q = q.order("last_attempt",    { ascending: false, nullsFirst: false });
-      else                       q = q.order("total_attempts",  { ascending: true }).order("brand_id", { ascending: true });
-      return q.range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
-    })(),
+    // Paginated rows via date-aware function
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (supabase.rpc as any)("get_missing_delivery_rows", {
+      p_from_ts:  fromTs,
+      p_to_ts:    toTs,
+      p_brand_id: brandQ  ? Number(brandQ) : null,
+      p_email:    emailQ  || null,
+      p_status:   statusQ || null,
+      p_sort:     sort,
+      p_limit:    PAGE_SIZE,
+      p_offset:   (page - 1) * PAGE_SIZE,
+    }),
   ]);
 
-  const brands = brandsRes.data ?? [];
-  const rows   = (rowRes.data ?? []) as MissingDelivery[];
-  const total  = countRes.count ?? 0;
+  const brands = (brandsRes.data ?? []) as { id: number; name: string }[];
+  const rows   = (rowsRes.data   ?? []) as MissingRow[];
 
-  const summaryRows = (summaryRes.data ?? []) as { status_type: string; cnt: number }[];
+  const summaryRows     = (summaryRes.data ?? []) as { status_type: string; cnt: number }[];
   const neverCount       = Number(summaryRows.find((r) => r.status_type === "never")?.cnt       ?? 0);
   const undeliveredCount = Number(summaryRows.find((r) => r.status_type === "undelivered")?.cnt ?? 0);
   const partialCount     = Number(summaryRows.find((r) => r.status_type === "partial")?.cnt     ?? 0);
 
-  // Reuse brands list — no extra query needed
-  const brandMap = Object.fromEntries(
-    (brands as { id: number; name: string }[]).map((b) => [b.id, b.name]),
-  );
+  // Total for pagination = count of the active status category (or sum of all)
+  const total =
+    statusQ === "never"       ? neverCount :
+    statusQ === "undelivered" ? undeliveredCount :
+    statusQ === "partial"     ? partialCount :
+    neverCount + undeliveredCount + partialCount;
+
+  const brandMap = Object.fromEntries(brands.map((b) => [b.id, b.name]));
+  const hasFilters = emailQ || brandQ || statusQ;
+
+  // ── URL builders ──────────────────────────────────────────────────────────
+  function dateParams() {
+    return `preset=${preset}&from=${fromDate}&to=${toDate}`;
+  }
 
   function chipHref(s: string) {
     const p = new URLSearchParams();
+    p.set("preset", preset); p.set("from", fromDate); p.set("to", toDate);
     if (emailQ) p.set("email", emailQ);
     if (brandQ) p.set("brand", brandQ);
     if (s && s !== statusQ) p.set("status", s);
@@ -174,14 +158,13 @@ export default async function MissingDeliveriesPage(props: {
 
   function sortHref(key: SortKey) {
     const p = new URLSearchParams();
+    p.set("preset", preset); p.set("from", fromDate); p.set("to", toDate);
     if (emailQ)  p.set("email",  emailQ);
     if (brandQ)  p.set("brand",  brandQ);
     if (statusQ) p.set("status", statusQ);
     p.set("sort", key);
     return `?${p.toString()}`;
   }
-
-  const hasFilters = emailQ || brandQ || statusQ;
 
   return (
     <div className="space-y-5">
@@ -190,51 +173,61 @@ export default async function MissingDeliveriesPage(props: {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Missing Deliveries</h1>
         <p className="text-sm text-muted-foreground">
-          Recipients in the system with at least one unconfirmed or missing email delivery.
+          Recipients with at least one unconfirmed or missing email delivery.
         </p>
       </div>
 
-      {/* Clickable summary chips */}
+      {/* Summary chips */}
       <div className="flex flex-wrap gap-3">
-        <a href={chipHref("never")} className={cn(
-          "flex items-center gap-2.5 rounded-lg border px-4 py-3 text-sm transition-colors hover:bg-muted/60",
-          statusQ === "never" ? "border-muted-foreground/40 bg-muted" : "border-border bg-card",
-        )}>
-          <MailX className="h-4 w-4 text-muted-foreground" />
-          <span className="text-muted-foreground">Never sent</span>
-          <span className="ml-1 font-semibold tabular-nums">{neverCount.toLocaleString()}</span>
-        </a>
 
-        <a href={chipHref("undelivered")} className={cn(
-          "flex items-center gap-2.5 rounded-lg border px-4 py-3 text-sm transition-colors hover:bg-red-50 dark:hover:bg-red-950/20",
-          statusQ === "undelivered"
-            ? "border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950/30"
-            : undeliveredCount > 0
-            ? "border-red-200 bg-red-50/60 dark:border-red-900/40 dark:bg-red-950/10"
-            : "border-border bg-card",
-        )}>
-          <MailWarning className={cn("h-4 w-4", undeliveredCount > 0 ? "text-red-500" : "text-muted-foreground")} />
-          <span className={undeliveredCount > 0 ? "text-red-700 dark:text-red-400" : "text-muted-foreground"}>
-            Attempted, undelivered
-          </span>
-          <span className={cn("ml-1 font-semibold tabular-nums", undeliveredCount > 0 ? "text-red-700 dark:text-red-400" : "")}>
-            {undeliveredCount.toLocaleString()}
-          </span>
-        </a>
+        {/* Never sent */}
+        <div className="flex items-center gap-1.5">
+          <a href={chipHref("never")} className={cn(
+            "flex items-center gap-2.5 rounded-lg border px-4 py-3 text-sm transition-colors hover:bg-muted/60",
+            statusQ === "never" ? "border-muted-foreground/40 bg-muted" : "border-border bg-card",
+          )}>
+            <MailX className="h-4 w-4 text-muted-foreground" />
+            <span className="text-muted-foreground">Never sent</span>
+            <span className="ml-1 font-semibold tabular-nums">{neverCount.toLocaleString()}</span>
+          </a>
+          <InfoTooltip text="Expected recipients that exist in the system but have received zero email attempts within the selected date range." />
+        </div>
 
-        <a href={chipHref("partial")} className={cn(
-          "flex items-center gap-2.5 rounded-lg border px-4 py-3 text-sm transition-colors hover:bg-amber-50 dark:hover:bg-amber-950/20",
-          statusQ === "partial"
-            ? "border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"
-            : "border-border bg-card",
-        )}>
-          <MailCheck className="h-4 w-4 text-amber-500" />
-          <div>
+        {/* Attempted, undelivered */}
+        <div className="flex items-center gap-1.5">
+          <a href={chipHref("undelivered")} className={cn(
+            "flex items-center gap-2.5 rounded-lg border px-4 py-3 text-sm transition-colors hover:bg-red-50 dark:hover:bg-red-950/20",
+            statusQ === "undelivered"
+              ? "border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950/30"
+              : undeliveredCount > 0
+              ? "border-red-200 bg-red-50/60 dark:border-red-900/40 dark:bg-red-950/10"
+              : "border-border bg-card",
+          )}>
+            <MailWarning className={cn("h-4 w-4", undeliveredCount > 0 ? "text-red-500" : "text-muted-foreground")} />
+            <span className={undeliveredCount > 0 ? "text-red-700 dark:text-red-400" : "text-muted-foreground"}>
+              Attempted, undelivered
+            </span>
+            <span className={cn("ml-1 font-semibold tabular-nums", undeliveredCount > 0 ? "text-red-700 dark:text-red-400" : "")}>
+              {undeliveredCount.toLocaleString()}
+            </span>
+          </a>
+          <InfoTooltip text="At least one email was attempted for this recipient in the date range, but every single attempt ended in bounced, failed, dropped, or spam — none reached the inbox." />
+        </div>
+
+        {/* Partial delivery */}
+        <div className="flex items-center gap-1.5">
+          <a href={chipHref("partial")} className={cn(
+            "flex items-center gap-2.5 rounded-lg border px-4 py-3 text-sm transition-colors hover:bg-amber-50 dark:hover:bg-amber-950/20",
+            statusQ === "partial"
+              ? "border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30"
+              : "border-border bg-card",
+          )}>
+            <MailCheck className="h-4 w-4 text-amber-500" />
             <span className="text-muted-foreground">Partial delivery</span>
-            <span className="ml-2 text-[11px] text-muted-foreground/70">some but not all</span>
-          </div>
-          <span className="ml-1 font-semibold tabular-nums">{partialCount.toLocaleString()}</span>
-        </a>
+            <span className="ml-1 font-semibold tabular-nums">{partialCount.toLocaleString()}</span>
+          </a>
+          <InfoTooltip text="Some emails reached this recipient successfully, but others in the same date range bounced or failed. The delivery bar shows the ratio." />
+        </div>
 
         {statusQ && (
           <a href={chipHref("")} className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground transition-colors hover:bg-muted/60">
@@ -252,13 +245,14 @@ export default async function MissingDeliveriesPage(props: {
           ? <><span className="font-medium text-foreground">{total.toLocaleString()}</span> recipient{total !== 1 ? "s" : ""} match your filters</>
           : <><span className="font-medium text-foreground">{total.toLocaleString()}</span> recipient{total !== 1 ? "s" : ""} with missing deliveries</>
         }
+        <span className="ml-2 text-muted-foreground/60">· {fromDate} → {toDate}</span>
       </p>
 
       {/* Table */}
       <Card>
         <CardContent className="p-0">
-          {rowRes.error ? (
-            <p className="p-6 text-sm text-destructive">{rowRes.error.message}</p>
+          {rowsRes.error ? (
+            <p className="p-6 text-sm text-destructive">{String(rowsRes.error)}</p>
           ) : rows.length === 0 ? (
             <EmptyState statusQ={statusQ} emailQ={emailQ} />
           ) : (
@@ -275,19 +269,18 @@ export default async function MissingDeliveriesPage(props: {
                       <span className="ml-1 text-[10px] font-normal text-muted-foreground/60">red = missing</span>
                     </th>
                     <SortTh href={sortHref("last")} active={sort === "last"} className="hidden xl:table-cell">Last Attempt</SortTh>
+                    <th className="px-3 py-3 text-xs font-medium text-muted-foreground">History</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
                   {rows.map((row, i) => {
                     const brandName = row.brand_id ? (brandMap[row.brand_id] ?? `Brand ${row.brand_id}`) : "—";
-                    const attempts  = row.total_attempts ?? 0;
-                    const delivered = row.delivered ?? 0;
+                    const attempts  = Number(row.total_attempts ?? 0);
+                    const delivered = Number(row.delivered      ?? 0);
 
                     return (
-                      <tr
-                        key={`${row.brand_id}-${row.branch_id}-${row.email}-${i}`}
-                        className="transition-colors hover:bg-muted/40"
-                      >
+                      <tr key={`${row.brand_id}-${row.branch_id}-${row.email}-${i}`}
+                        className="transition-colors hover:bg-muted/40">
                         <td className="py-2.5 pl-4 pr-3 font-medium">{brandName}</td>
                         <td className="px-3 py-2.5">
                           <span className="block max-w-[220px] truncate font-mono text-xs" title={row.email ?? ""}>
@@ -308,6 +301,17 @@ export default async function MissingDeliveriesPage(props: {
                             ? new Date(row.last_attempt).toLocaleString()
                             : <span className="italic">Never</span>}
                         </td>
+                        <td className="px-3 py-2.5">
+                          {row.email && (
+                            <RecipientHistoryDrawer
+                              email={row.email}
+                              brandId={row.brand_id}
+                              brandName={brandName}
+                              fromDate={fromDate}
+                              toDate={toDate}
+                            />
+                          )}
+                        </td>
                       </tr>
                     );
                   })}
@@ -325,9 +329,7 @@ export default async function MissingDeliveriesPage(props: {
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
-function SortTh({
-  href, active, children, className,
-}: {
+function SortTh({ href, active, children, className }: {
   href: string; active: boolean; children: React.ReactNode; className?: string;
 }) {
   return (
@@ -345,9 +347,9 @@ function SortTh({
 
 function EmptyState({ statusQ, emailQ }: { statusQ: string; emailQ: string }) {
   const messages: Record<string, { title: string; body: string }> = {
-    never:       { title: "No recipients without sends",  body: "All recipients have been attempted at least once." },
-    undelivered: { title: "No undelivered sends",         body: "All attempted sends have at least one confirmed delivery." },
-    partial:     { title: "No partial deliveries",        body: "No recipients match partial delivery criteria." },
+    never:       { title: "No recipients without sends",  body: "All expected recipients have been attempted at least once in this date range." },
+    undelivered: { title: "No fully undelivered sends",   body: "All attempted recipients have at least one confirmed delivery." },
+    partial:     { title: "No partial deliveries",        body: "No recipients match partial delivery criteria for this date range." },
   };
   const msg = statusQ ? messages[statusQ] : null;
 
@@ -364,7 +366,7 @@ function EmptyState({ statusQ, emailQ }: { statusQ: string; emailQ: string }) {
       <MailCheck className="h-8 w-8 text-emerald-500" />
       <p className="font-medium">{msg?.title ?? "No missing deliveries"}</p>
       <p className="max-w-sm text-sm text-muted-foreground">
-        {msg?.body ?? "No recipients match your current filters."}
+        {msg?.body ?? "No recipients match your current filters for this date range."}
       </p>
     </div>
   );

@@ -4,7 +4,6 @@ import {
   PieChart,
   Pie,
   Cell,
-  Tooltip,
   ResponsiveContainer,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -78,6 +77,8 @@ export function DeliveryDonut({
                     outerRadius={112}
                     paddingAngle={2}
                     strokeWidth={0}
+                    label={false}
+                    labelLine={false}
                   >
                     {data.map((entry) => (
                       <Cell
@@ -86,19 +87,6 @@ export function DeliveryDonut({
                       />
                     ))}
                   </Pie>
-                  <Tooltip
-                    contentStyle={{
-                      background: "hsl(var(--card))",
-                      border: "1px solid hsl(var(--border))",
-                      borderRadius: "6px",
-                      fontSize: "12px",
-                      color: "hsl(var(--foreground))",
-                    }}
-                    formatter={(val, name) => [
-                      `${val} (${Math.round(((val as number) / total) * 100)}%)`,
-                      STATUS_CONFIG[name as string]?.label ?? name,
-                    ]}
-                  />
                 </PieChart>
               </ResponsiveContainer>
 
